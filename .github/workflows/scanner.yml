@@ -1,0 +1,49 @@
+name: Liquidity Sweep Scanner
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Tue-Sat UTC covers Mon-Fri US sessions, including the Friday session.
+    - cron: "15 1 * * 2-6"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: liquidity-sweep-scanner
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run liquidity sweep scanner
+        run: python liquidity_sweep_scanner.py
+
+      - name: Verify dashboard
+        run: test -s index.html
+
+      - name: Deploy dashboard to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_branch: gh-pages
+          publish_dir: .
+          keep_files: true
+          force_orphan: true
