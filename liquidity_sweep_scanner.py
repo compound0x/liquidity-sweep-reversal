@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 # --- dependencies -------------------------------------------------------------
 import importlib, subprocess, sys
 
@@ -20,7 +22,6 @@ then for a structure shift with displacement + volume in the opposite direction.
 Run this ONCE. In live mode the polling loop is internal - you do not re-run anything
 per minute; the function refetches and re-evaluates on its own schedule until you stop it.
 """
-from __future__ import annotations
 
 # =============================== SETTINGS =====================================
 MODE = "scan"              # "scan" = replay recent history | "live" = poll continuously
@@ -28,7 +29,7 @@ SCAN_DAYS = 2              # history mode: days of 1m data to replay (Yahoo caps
 LIVE_POLL_SECONDS = 30     # live mode: seconds between refresh cycles
 LIVE_MAX_MINUTES = None    # live mode: auto-stop after N minutes (None = until interrupted)
 ASSET_FILTER = None        # e.g. ["NAS100", "XAUUSD", "BTCUSD"] — None = every asset
-SAVE_HTML = "sweep_dashboard.html"   # also write a standalone page; None = inline only
+SAVE_HTML = "index.html"   # also write a standalone page; None = inline only
 # ==============================================================================
 
 # --- imports & configuration --------------------------------------------------
