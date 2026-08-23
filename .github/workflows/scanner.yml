@@ -3,7 +3,7 @@ name: Liquidity Sweep Scanner
 on:
   workflow_dispatch:
   schedule:
-    # Run every 5 minutes, every day. The Python gate below uses
+    # Every 5 minutes, Monday through Sunday. The Python gate below uses
     # America/New_York so EST/EDT is handled automatically.
     - cron: "*/5 7-21 * * *"
 
@@ -59,16 +59,12 @@ jobs:
 
           now = datetime.now(ZoneInfo("America/New_York"))
           minute = now.hour * 60 + now.minute
-
-          # Reference candles close at 03:00, 10:00 and 14:00 EST/EDT.
-          # Scan every 5 minutes from +5 through +60 minutes inclusive.
           reference_hours = (3, 10, 14)
           active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in reference_hours)
 
           print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
-          print(f"Reference candles: 03:00, 10:00, 14:00 EST/EDT")
+          print("Reference candles: 03:00, 10:00, 14:00 EST/EDT")
           print(f"Scan window active: {active}")
-
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
           PY
@@ -77,9 +73,116 @@ jobs:
         if: steps.window.outputs.active != 'true'
         run: echo "Outside the 1-hour post-reference scan windows; no scanner run needed."
 
-      - name: Run liquidity sweep scanner
+      - name: Run scanner and notify Discord + Telegram
         if: steps.window.outputs.active == 'true'
-        run: python liquidity_sweep_scanner.py
+        env:
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python - <<'PY'
+          import hashlib, json, os
+          from datetime import datetime, timedelta
+          from urllib.request import Request, urlopen
+          from zoneinfo import ZoneInfo
+
+          import liquidity_sweep_scanner as scanner
+
+          NY = ZoneInfo("America/New_York")
+          now = datetime.now(NY)
+          sig_df, _ = scanner.main()
+          current = []
+
+          if sig_df is not None and not sig_df.empty:
+              for row in sig_df.to_dict("records"):
+                  ss = row.get("session_start")
+                  if ss is None:
+                      continue
+                  if hasattr(ss, "to_pydatetime"):
+                      ss = ss.to_pydatetime()
+                  if ss.tzinfo is None:
+                      ss = ss.replace(tzinfo=NY)
+                  ss = ss.astimezone(NY)
+                  if ss.date() != now.date() or not (ss + timedelta(minutes=5) <= now <= ss + timedelta(minutes=60)):
+                      continue
+                  clean = {}
+                  for k, v in row.items():
+                      if hasattr(v, "isoformat"):
+                          clean[k] = v.isoformat()
+                      else:
+                          try:
+                              clean[k] = v.item()
+                          except AttributeError:
+                              clean[k] = v
+                  clean["timestamp_est"] = now.strftime("%Y-%m-%d %H:%M:%S EST/EDT")
+                  clean["reference_est"] = ss.strftime("%Y-%m-%d %H:%M EST/EDT")
+                  current.append(clean)
+
+          def key(s):
+              return "|".join(str(s.get(k, "")) for k in ("asset", "session", "kind", "side", "time"))
+
+          state_path = ".signal_state.json"
+          try:
+              with open(state_path, encoding="utf-8") as f:
+                  sent = set(json.load(f))
+          except (FileNotFoundError, json.JSONDecodeError):
+              sent = set()
+
+          fresh = [s for s in current if key(s) not in sent]
+          print(f"Current-window signals: {len(current)}; new signals: {len(fresh)}")
+
+          def text(s):
+              kind = s.get("kind", "SIGNAL")
+              side = s.get("side", "")
+              asset = s.get("asset", "")
+              price = s.get("price", "")
+              detail = s.get("detail", "")
+              return (
+                  f"{'🚨' if kind == 'REVERSAL' else '⚠️'} {kind} {side}\n"
+                  f"Asset: {asset}\n"
+                  f"Reference: {s.get('reference_est', '')}\n"
+                  f"Time: {s.get('timestamp_est', '')}\n"
+                  f"Price: {price}\n"
+                  f"{detail}\n\n"
+                  f"Dashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
+              )
+
+          def post(url, payload):
+              if not url:
+                  return
+              req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
+              with urlopen(req, timeout=15) as r:
+                  print(f"Notification sent: HTTP {r.status}")
+
+          for s in fresh:
+              msg = text(s)
+              if os.environ.get("DISCORD_WEBHOOK_URL"):
+                  post(os.environ["DISCORD_WEBHOOK_URL"], {"content": msg})
+              if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
+                  post(
+                      f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+                      {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg},
+                  )
+              sent.add(key(s))
+
+          # Keep state small: retain the most recent 500 signal keys.
+          sent_list = list(sent)[-500:]
+          with open(state_path, "w", encoding="utf-8") as f:
+              json.dump(sent_list, f, indent=2)
+          with open("current_signals.json", "w", encoding="utf-8") as f:
+              json.dump(current, f, indent=2, default=str)
+          PY
+
+      - name: Persist notification state
+        if: steps.window.outputs.active == 'true'
+        run: |
+          if ! git diff --quiet -- .signal_state.json; then
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git add .signal_state.json
+            git commit -m "Update signal notification state"
+            git push
+          fi
 
       - name: Verify dashboard
         if: steps.window.outputs.active == 'true'
