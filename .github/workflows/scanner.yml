@@ -3,8 +3,10 @@ name: Liquidity Sweep Scanner
 on:
   workflow_dispatch:
   schedule:
-    # Tue-Sat UTC covers Mon-Fri US sessions, including the Friday session.
-    - cron: "15 1 * * 2-6"
+    # GitHub Actions schedules are UTC. We run every 5 minutes across the
+    # broad NY-time range that covers all three reference windows in both
+    # EST and EDT, then gate the actual scan using America/New_York.
+    - cron: "*/5 7-21 * * 1-5"
 
 permissions:
   contents: write
@@ -49,23 +51,42 @@ jobs:
           print("Scanner syntax check passed and production settings applied.")
           PY
 
-      - name: Persist scanner normalization
+      - name: Check New York scan window
+        id: window
         run: |
-          if ! git diff --quiet -- liquidity_sweep_scanner.py; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add liquidity_sweep_scanner.py
-            git commit -m "Fix scanner standalone execution and Pages output"
-            git push
-          fi
+          python - <<'PY'
+          from datetime import datetime
+          from zoneinfo import ZoneInfo
+
+          now = datetime.now(ZoneInfo("America/New_York"))
+          minute = now.hour * 60 + now.minute
+
+          # Run at 10:05 through 10:55 for the 10:00 reference candle,
+          # and at 11:00 as the final check for that one-hour window.
+          # Equivalent windows apply to 03:00 and 14:00 reference candles.
+          reference_hours = (3, 10, 14)
+          active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in reference_hours)
+
+          print(f"New York time: {now:%Y-%m-%d %H:%M:%S %Z}")
+          print(f"Scan window active: {active}")
+          with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
+              f.write(f"active={'true' if active else 'false'}\n")
+          PY
+
+      - name: Skip outside scan windows
+        if: steps.window.outputs.active != 'true'
+        run: echo "Outside the 1-hour post-reference scan windows; no scanner run needed."
 
       - name: Run liquidity sweep scanner
+        if: steps.window.outputs.active == 'true'
         run: python liquidity_sweep_scanner.py
 
       - name: Verify dashboard
+        if: steps.window.outputs.active == 'true'
         run: test -s index.html
 
       - name: Deploy dashboard to GitHub Pages
+        if: steps.window.outputs.active == 'true'
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
