@@ -3,10 +3,9 @@ name: Liquidity Sweep Scanner
 on:
   workflow_dispatch:
   schedule:
-    # GitHub Actions schedules are UTC. We run every 5 minutes across the
-    # broad NY-time range that covers all three reference windows in both
-    # EST and EDT, then gate the actual scan using America/New_York.
-    - cron: "*/5 7-21 * * 1-5"
+    # Run every 5 minutes, every day. The Python gate below uses
+    # America/New_York so EST/EDT is handled automatically.
+    - cron: "*/5 7-21 * * *"
 
 permissions:
   contents: write
@@ -51,7 +50,7 @@ jobs:
           print("Scanner syntax check passed and production settings applied.")
           PY
 
-      - name: Check New York scan window
+      - name: Check EST scan window
         id: window
         run: |
           python - <<'PY'
@@ -61,14 +60,15 @@ jobs:
           now = datetime.now(ZoneInfo("America/New_York"))
           minute = now.hour * 60 + now.minute
 
-          # Run at 10:05 through 10:55 for the 10:00 reference candle,
-          # and at 11:00 as the final check for that one-hour window.
-          # Equivalent windows apply to 03:00 and 14:00 reference candles.
+          # Reference candles close at 03:00, 10:00 and 14:00 EST/EDT.
+          # Scan every 5 minutes from +5 through +60 minutes inclusive.
           reference_hours = (3, 10, 14)
           active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in reference_hours)
 
-          print(f"New York time: {now:%Y-%m-%d %H:%M:%S %Z}")
+          print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
+          print(f"Reference candles: 03:00, 10:00, 14:00 EST/EDT")
           print(f"Scan window active: {active}")
+
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
           PY
