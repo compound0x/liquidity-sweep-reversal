@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       test_notification:
-        description: "Send a Discord/Telegram test alert without waiting for a scan window"
+        description: "Send a Telegram test alert without waiting for a scan window"
         required: false
         type: boolean
         default: false
@@ -38,10 +38,9 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Test Discord and Telegram notifications
+      - name: Test Telegram notifications
         if: env.TEST_NOTIFICATION == 'true'
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
@@ -62,11 +61,6 @@ jobs:
                   raise RuntimeError(f"{label} returned HTTP {e.code}: {body}") from e
               except URLError as e:
                   raise RuntimeError(f"{label} connection failed: {e.reason}") from e
-
-          discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-          if not discord:
-              raise RuntimeError("DISCORD_WEBHOOK_URL is not configured.")
-          send("Discord", discord, {"content": msg})
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
           chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -117,10 +111,9 @@ jobs:
         if: env.TEST_NOTIFICATION != 'true' && steps.window.outputs.active != 'true'
         run: echo "Outside the 1-hour post-reference scan windows; no scanner run needed."
 
-      - name: Run scanner and notify Discord + Telegram
+      - name: Run scanner and notify Telegram
         if: env.TEST_NOTIFICATION != 'true' && steps.window.outputs.active == 'true'
         env:
-          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python notify_signals.py
