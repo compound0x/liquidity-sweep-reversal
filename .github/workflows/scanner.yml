@@ -9,8 +9,6 @@ on:
         type: boolean
         default: false
   schedule:
-    # Every 5 minutes, Monday through Sunday. The Python gate below uses
-    # America/New_York so EST/EDT is handled automatically.
     - cron: "*/5 7-21 * * *"
 
 permissions:
@@ -27,17 +25,14 @@ jobs:
   scan:
     runs-on: ubuntu-latest
     timeout-minutes: 20
-
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: "3.12"
           cache: "pip"
-
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
@@ -52,32 +47,31 @@ jobs:
         run: |
           python - <<'PY'
           import json, os
+          from urllib.error import HTTPError, URLError
           from urllib.request import Request, urlopen
 
-          msg = (
-              "🧪 LIQUIDITY SWEEP SCANNER TEST\n\n"
-              "This is a test notification from GitHub Actions.\n"
-              "No trading signal was generated.\n\n"
-              "Dashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
-          )
+          msg = "🧪 LIQUIDITY SWEEP SCANNER TEST\n\nThis is a test notification from GitHub Actions.\nNo trading signal was generated.\n\nDashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
+
+          def send(label, url, payload):
+              try:
+                  req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                  with urlopen(req, timeout=15) as r:
+                      print(f"{label}: HTTP {r.status}")
+              except HTTPError as e:
+                  body = e.read().decode("utf-8", errors="replace")
+                  raise RuntimeError(f"{label} returned HTTP {e.code}: {body}") from e
+              except URLError as e:
+                  raise RuntimeError(f"{label} connection failed: {e.reason}") from e
 
           discord = os.environ.get("DISCORD_WEBHOOK_URL", "").strip()
-          if discord:
-              req = Request(discord, data=json.dumps({"content": msg}).encode(),
-                            headers={"Content-Type": "application/json"}, method="POST")
-              with urlopen(req, timeout=15) as r:
-                  print(f"Discord test sent: HTTP {r.status}")
-          else:
-              print("DISCORD_WEBHOOK_URL is not configured.")
+          if not discord:
+              raise RuntimeError("DISCORD_WEBHOOK_URL is not configured.")
+          send("Discord", discord, {"content": msg})
 
           token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
           chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
           if token and chat:
-              url = f"https://api.telegram.org/bot{token}/sendMessage"
-              req = Request(url, data=json.dumps({"chat_id": chat, "text": msg}).encode(),
-                            headers={"Content-Type": "application/json"}, method="POST")
-              with urlopen(req, timeout=15) as r:
-                  print(f"Telegram test sent: HTTP {r.status}")
+              send("Telegram", f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat, "text": msg})
           else:
               print("Telegram secrets are not configured; skipping Telegram test.")
           PY
@@ -110,14 +104,10 @@ jobs:
           python - <<'PY'
           from datetime import datetime
           from zoneinfo import ZoneInfo
-
           now = datetime.now(ZoneInfo("America/New_York"))
           minute = now.hour * 60 + now.minute
-          reference_hours = (3, 10, 14)
-          active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in reference_hours)
-
+          active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
           print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
-          print("Reference candles: 03:00, 10:00, 14:00 EST/EDT")
           print(f"Scan window active: {active}")
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
@@ -133,98 +123,7 @@ jobs:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: |
-          python - <<'PY'
-          import json, os
-          from datetime import datetime, timedelta
-          from urllib.request import Request, urlopen
-          from zoneinfo import ZoneInfo
-          import liquidity_sweep_scanner as scanner
-
-          NY = ZoneInfo("America/New_York")
-          now = datetime.now(NY)
-          sig_df, _ = scanner.main()
-          current = []
-
-          if sig_df is not None and not sig_df.empty:
-              for row in sig_df.to_dict("records"):
-                  ss = row.get("session_start")
-                  if ss is None:
-                      continue
-                  if hasattr(ss, "to_pydatetime"):
-                      ss = ss.to_pydatetime()
-                  if ss.tzinfo is None:
-                      ss = ss.replace(tzinfo=NY)
-                  ss = ss.astimezone(NY)
-                  if ss.date() != now.date() or not (ss + timedelta(minutes=5) <= now <= ss + timedelta(minutes=60)):
-                      continue
-                  clean = {}
-                  for k, v in row.items():
-                      if hasattr(v, "isoformat"):
-                          clean[k] = v.isoformat()
-                      else:
-                          try:
-                              clean[k] = v.item()
-                          except AttributeError:
-                              clean[k] = v
-                  clean["timestamp_est"] = now.strftime("%Y-%m-%d %H:%M:%S EST/EDT")
-                  clean["reference_est"] = ss.strftime("%Y-%m-%d %H:%M EST/EDT")
-                  current.append(clean)
-
-          state_path = ".signal_state.json"
-          try:
-              with open(state_path, encoding="utf-8") as f:
-                  sent = set(json.load(f))
-          except (FileNotFoundError, json.JSONDecodeError):
-              sent = set()
-
-          def key(s):
-              return "|".join(str(s.get(k, "")) for k in ("asset", "session", "kind", "side", "time"))
-
-          fresh = [s for s in current if key(s) not in sent]
-          print(f"Current-window signals: {len(current)}; new signals: {len(fresh)}")
-
-          def text(s):
-              kind = s.get("kind", "SIGNAL")
-              return (
-                  f"{'🚨' if kind == 'REVERSAL' else '⚠️'} {kind} {s.get('side', '')}\n"
-                  f"Asset: {s.get('asset', '')}\n"
-                  f"Reference: {s.get('reference_est', '')}\n"
-                  f"Time: {s.get('timestamp_est', '')}\n"
-                  f"Price: {s.get('price', '')}\n"
-                  f"{s.get('detail', '')}\n\n"
-                  f"Dashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
-              )
-
-          def post(url, payload):
-              req = Request(url, data=json.dumps(payload).encode(),
-                            headers={"Content-Type": "application/json"}, method="POST")
-              with urlopen(req, timeout=15) as r:
-                  print(f"Notification sent: HTTP {r.status}")
-
-          for s in fresh:
-              msg = text(s)
-              if os.environ.get("DISCORD_WEBHOOK_URL"):
-                  post(os.environ["DISCORD_WEBHOOK_URL"], {"content": msg})
-              if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-                  post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-                       {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg})
-              sent.add(key(s))
-
-          with open(state_path, "w", encoding="utf-8") as f:
-              json.dump(list(sent)[-500:], f, indent=2)
-          PY
-
-      - name: Persist notification state
-        if: env.TEST_NOTIFICATION != 'true' && steps.window.outputs.active == 'true'
-        run: |
-          if ! git diff --quiet -- .signal_state.json; then
-            git config user.name "github-actions[bot]"
-            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git add .signal_state.json
-            git commit -m "Update signal notification state"
-            git push
-          fi
+        run: python notify_signals.py
 
       - name: Verify dashboard
         if: env.TEST_NOTIFICATION != 'true' && steps.window.outputs.active == 'true'
