@@ -4,12 +4,12 @@ on:
   workflow_dispatch:
     inputs:
       scan_window_override:
-        description: "Run the real scanner now even outside the normal 03:05-04:00, 10:05-11:00, 14:05-15:00 New York windows"
+        description: "Run the real scanner now even outside the normal scan windows"
         required: false
         type: boolean
         default: false
       test_notification:
-        description: "Send a Telegram test alert only; do not run the scanner"
+        description: "Send a Telegram test alert only"
         required: false
         type: boolean
         default: false
@@ -42,38 +42,31 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Test Telegram notifications
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notification == true }}
+      - name: Test Telegram notification
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notification }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
           import json, os
-          from urllib.error import HTTPError, URLError
           from urllib.request import Request, urlopen
-
-          msg = "🧪 LIQUIDITY SWEEP SCANNER TEST\n\nThis is a test notification from GitHub Actions.\nNo trading signal was generated.\n\nDashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
           token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
           chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
           if not token or not chat:
-              raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must both be configured for a notification test.")
-          try:
-              req = Request(f"https://api.telegram.org/bot{token}/sendMessage", data=json.dumps({"chat_id": chat, "text": msg}).encode(), headers={"Content-Type": "application/json"}, method="POST")
-              with urlopen(req, timeout=15) as r:
-                  print(f"Telegram: HTTP {r.status}")
-          except HTTPError as e:
-              raise RuntimeError(f"Telegram returned HTTP {e.code}: {e.read().decode('utf-8', errors='replace')}") from e
-          except URLError as e:
-              raise RuntimeError(f"Telegram connection failed: {e.reason}") from e
+              raise RuntimeError("TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID must be configured.")
+          msg = "🧪 LIQUIDITY SWEEP SCANNER TEST\n\nNo trading signal was generated.\n\nDashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
+          req = Request(f"https://api.telegram.org/bot{token}/sendMessage", data=json.dumps({"chat_id": chat, "text": msg}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+          with urlopen(req, timeout=15) as r:
+              print(f"Telegram: HTTP {r.status}")
           PY
 
       - name: Stop after notification test
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notification == true }}
-        run: echo "Notification test completed. Normal scan was intentionally skipped."
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.test_notification }}
+        run: echo "Notification test completed; scanner skipped by request."
 
-      - name: Normalize scanner for standalone execution
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification == true) }}
+      - name: Normalize scanner
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) }}
         run: |
           python - <<'PY'
           from pathlib import Path
@@ -86,14 +79,11 @@ jobs:
           s = s.replace('SAVE_HTML = "sweep_dashboard.html"', 'SAVE_HTML = "index.html"', 1)
           p.write_text(s, encoding="utf-8")
           compile(s, str(p), "exec")
-          print("Scanner syntax check passed and production settings applied.")
           PY
 
-      - name: Check scan window or manual override
-        id: window
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification == true) }}
-        env:
-          SCAN_WINDOW_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_window_override || false }}
+      - name: Decide whether to scan
+        id: gate
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) }}
         run: |
           python - <<'PY'
           import os
@@ -103,36 +93,44 @@ jobs:
           now = datetime.now(ZoneInfo("America/New_York"))
           minute = now.hour * 60 + now.minute
           normal = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
-          override = os.environ.get("SCAN_WINDOW_OVERRIDE", "false").strip().lower() == "true"
-          active = normal or override
+
+          # Only a manually dispatched workflow can use the override.
+          manual = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
+          override = manual and os.getenv("OVERRIDE_INPUT", "false").strip().lower() == "true"
+          allowed = normal or override
 
           print(f"Timestamp (New York): {now:%Y-%m-%d %H:%M:%S %Z}")
           print("Normal windows: 03:05-04:00, 10:05-11:00, 14:05-15:00")
           print(f"Normal window active: {normal}")
-          print(f"Manual scan-window override: {override}")
-          print(f"Scanner allowed to run: {active}")
+          print(f"Workflow event: {os.getenv('GITHUB_EVENT_NAME')}")
+          print(f"Manual override input: {os.getenv('OVERRIDE_INPUT')}")
+          print(f"Manual override active: {override}")
+          print(f"Scanner allowed to run: {allowed}")
 
           with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
-              f.write(f"active={'true' if active else 'false'}\n")
+              f.write(f"active={'true' if allowed else 'false'}\n")
           PY
+        env:
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
+          OVERRIDE_INPUT: ${{ inputs.scan_window_override }}
 
       - name: Skip outside scan windows
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification == true) && steps.window.outputs.active != 'true' }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) && steps.gate.outputs.active != 'true' }}
         run: echo "Outside the normal scan windows and no manual override was selected; scanner skipped."
 
-      - name: Run scanner and notify Telegram
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification == true) && steps.window.outputs.active == 'true' }}
+      - name: Run scanner
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) && steps.gate.outputs.active == 'true' }}
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python notify_signals.py
 
       - name: Verify dashboard
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification == true) && steps.window.outputs.active == 'true' }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) && steps.gate.outputs.active == 'true' }}
         run: test -s index.html
 
       - name: Deploy dashboard to GitHub Pages
-        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification == true) && steps.window.outputs.active == 'true' }}
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) && steps.gate.outputs.active == 'true' }}
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
