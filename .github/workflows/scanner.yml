@@ -93,8 +93,6 @@ jobs:
           now = datetime.now(ZoneInfo("America/New_York"))
           minute = now.hour * 60 + now.minute
           normal = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
-
-          # Only a manually dispatched workflow can use the override.
           manual = os.getenv("GITHUB_EVENT_NAME") == "workflow_dispatch"
           override = manual and os.getenv("OVERRIDE_INPUT", "false").strip().lower() == "true"
           allowed = normal or override
@@ -123,11 +121,15 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          SCAN_WINDOW_OVERRIDE: ${{ github.event_name == 'workflow_dispatch' && inputs.scan_window_override || false }}
         run: python notify_signals.py
 
       - name: Verify dashboard
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) && steps.gate.outputs.active == 'true' }}
-        run: test -s index.html
+        run: |
+          echo "Checking generated dashboard..."
+          ls -lah index.html || true
+          test -s index.html
 
       - name: Deploy dashboard to GitHub Pages
         if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.test_notification) && steps.gate.outputs.active == 'true' }}
