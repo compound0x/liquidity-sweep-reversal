@@ -3,18 +3,18 @@ name: Liquidity Sweep Scanner
 on:
   workflow_dispatch:
     inputs:
+      scan_window_override:
+        description: "Run the scanner now even if outside the normal EST scan windows"
+        required: false
+        type: boolean
+        default: false
       test_notification:
-        description: "Send a Telegram test alert without waiting for a scan window"
+        description: "Send a Telegram test alert without running the scanner"
         required: false
         type: boolean
         default: false
   schedule:
-    # Run every 5 minutes during each post-reference monitoring window.
-    # GitHub Actions uses New York local time here, including DST handling.
-    - cron: "5-55/5 3,10,14 * * *"
-      timezone: "America/New_York"
-    - cron: "0 4,11,15 * * *"
-      timezone: "America/New_York"
+    - cron: "*/5 * * * *"
 
 permissions:
   contents: write
@@ -24,6 +24,7 @@ concurrency:
   cancel-in-progress: false
 
 env:
+  SCAN_WINDOW_OVERRIDE: ${{ inputs.scan_window_override || 'false' }}
   TEST_NOTIFICATION: ${{ inputs.test_notification || 'false' }}
 
 jobs:
@@ -54,22 +55,19 @@ jobs:
           from urllib.error import HTTPError, URLError
           from urllib.request import Request, urlopen
           msg = "🧪 LIQUIDITY SWEEP SCANNER TEST\n\nThis is a test notification from GitHub Actions.\nNo trading signal was generated.\n\nDashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
-          def send(label, url, payload):
-              try:
-                  req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
-                  with urlopen(req, timeout=15) as r:
-                      print(f"{label}: HTTP {r.status}")
-              except HTTPError as e:
-                  body = e.read().decode("utf-8", errors="replace")
-                  raise RuntimeError(f"{label} returned HTTP {e.code}: {body}") from e
-              except URLError as e:
-                  raise RuntimeError(f"{label} connection failed: {e.reason}") from e
           token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
           chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
-          if token and chat:
-              send("Telegram", f"https://api.telegram.org/bot{token}/sendMessage", {"chat_id": chat, "text": msg})
-          else:
+          if not token or not chat:
               print("Telegram secrets are not configured; skipping Telegram test.")
+          else:
+              try:
+                  req = Request(f"https://api.telegram.org/bot{token}/sendMessage", data=json.dumps({"chat_id": chat, "text": msg}).encode(), headers={"Content-Type": "application/json"}, method="POST")
+                  with urlopen(req, timeout=15) as r:
+                      print(f"Telegram: HTTP {r.status}")
+              except HTTPError as e:
+                  raise RuntimeError(f"Telegram returned HTTP {e.code}: {e.read().decode('utf-8', errors='replace')}") from e
+              except URLError as e:
+                  raise RuntimeError(f"Telegram connection failed: {e.reason}") from e
           PY
 
       - name: Stop after notification test
@@ -93,26 +91,31 @@ jobs:
           print("Scanner syntax check passed and production settings applied.")
           PY
 
-      - name: Check exact EST scan window
+      - name: Check scan window or override
         id: window
         if: env.TEST_NOTIFICATION != 'true'
         run: |
           python - <<'PY'
+          import os
           from datetime import datetime
           from zoneinfo import ZoneInfo
           now = datetime.now(ZoneInfo("America/New_York"))
           minute = now.hour * 60 + now.minute
-          active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
-          print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
-          print("Expected windows: 03:05-04:00, 10:05-11:00, 14:05-15:00")
-          print(f"Scan window active: {active}")
+          normal = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
+          override = os.getenv("SCAN_WINDOW_OVERRIDE", "false").lower() == "true"
+          active = normal or override
+          print(f"Timestamp (New York): {now:%Y-%m-%d %H:%M:%S %Z}")
+          print("Normal windows: 03:05-04:00, 10:05-11:00, 14:05-15:00")
+          print(f"Normal window active: {normal}")
+          print(f"Manual override: {override}")
+          print(f"Scanner allowed to run: {active}")
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
           PY
 
       - name: Skip outside scan windows
         if: env.TEST_NOTIFICATION != 'true' && steps.window.outputs.active != 'true'
-        run: echo "Outside the 1-hour post-reference scan windows; no scanner run needed."
+        run: echo "Outside the normal scan windows and no manual override was selected; scanner skipped."
 
       - name: Run scanner and notify Telegram
         if: env.TEST_NOTIFICATION != 'true' && steps.window.outputs.active == 'true'
