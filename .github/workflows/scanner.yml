@@ -9,11 +9,11 @@ on:
         type: boolean
         default: false
   schedule:
-    # Exact 5-minute polling windows in New York local time.
-    # GitHub supports IANA timezones, so DST is handled automatically.
+    # Run every 5 minutes during each post-reference monitoring window.
+    # GitHub Actions uses New York local time here, including DST handling.
     - cron: "5-55/5 3,10,14 * * *"
       timezone: "America/New_York"
-    - cron: "0 4 * * *"
+    - cron: "0 4,11,15 * * *"
       timezone: "America/New_York"
 
 permissions:
@@ -53,9 +53,7 @@ jobs:
           import json, os
           from urllib.error import HTTPError, URLError
           from urllib.request import Request, urlopen
-
           msg = "🧪 LIQUIDITY SWEEP SCANNER TEST\n\nThis is a test notification from GitHub Actions.\nNo trading signal was generated.\n\nDashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
-
           def send(label, url, payload):
               try:
                   req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
@@ -66,7 +64,6 @@ jobs:
                   raise RuntimeError(f"{label} returned HTTP {e.code}: {body}") from e
               except URLError as e:
                   raise RuntimeError(f"{label} connection failed: {e.reason}") from e
-
           token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
           chat = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
           if token and chat:
@@ -96,7 +93,7 @@ jobs:
           print("Scanner syntax check passed and production settings applied.")
           PY
 
-      - name: Verify active EST scan window
+      - name: Check exact EST scan window
         id: window
         if: env.TEST_NOTIFICATION != 'true'
         run: |
@@ -107,7 +104,7 @@ jobs:
           minute = now.hour * 60 + now.minute
           active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
           print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
-          print("Expected runs: 03:05-04:00, 10:05-11:00, 14:05-15:00")
+          print("Expected windows: 03:05-04:00, 10:05-11:00, 14:05-15:00")
           print(f"Scan window active: {active}")
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
