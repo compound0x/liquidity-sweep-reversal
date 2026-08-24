@@ -31,14 +31,14 @@ def post_json(url: str, payload: dict) -> None:
             raise RuntimeError(f"HTTP {response.status}")
 
 
-def discord_send(message: str) -> None:
-    webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-    if not webhook:
-        print("Discord secret not configured; skipping Discord notification.")
-        return
-    post_json(webhook, {"content": message})
-    print("Discord notification sent.")
-
+#def discord_send(message: str) -> None:
+#    webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
+#    if not webhook:
+#        print("Discord secret not configured; skipping Discord notification.")
+#        return
+#    post_json(webhook, {"content": message})
+#    print("Discord notification sent.")
+#
 
 def telegram_send(message: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
