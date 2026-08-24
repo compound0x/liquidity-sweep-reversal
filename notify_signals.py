@@ -31,15 +31,6 @@ def post_json(url: str, payload: dict) -> None:
             raise RuntimeError(f"HTTP {response.status}")
 
 
-#def discord_send(message: str) -> None:
-#    webhook = os.getenv("DISCORD_WEBHOOK_URL", "").strip()
-#    if not webhook:
-#        print("Discord secret not configured; skipping Discord notification.")
-#        return
-#    post_json(webhook, {"content": message})
-#    print("Discord notification sent.")
-#
-
 def telegram_send(message: str) -> None:
     token = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     chat_id = os.getenv("TELEGRAM_CHAT_ID", "").strip()
@@ -109,17 +100,34 @@ def format_alert(sig: dict) -> str:
 
 def main() -> None:
     now = datetime.now(scanner.NY)
+    override = os.getenv("SCAN_WINDOW_OVERRIDE", "false").strip().lower() == "true"
     reference = current_reference(now)
-    if reference is None:
+
+    # Always generate the dashboard when the scanner is explicitly allowed to run.
+    # On a manual override outside a normal session, scan_history still produces the
+    # requested replay/dashboard; there is simply no active live session to notify.
+    if reference is None and not override:
         print("No active reference window; exiting.")
         return
 
     assets = scanner._selected_assets()
-    signals_df, sessions_df = scanner.scan_history(assets, days=scanner.SCAN_DAYS, cfg=scanner.CFG, verbose=False)
-    scanner.export_html(signals_df, sessions_df, DASHBOARD_FILE, scanner.CFG, days=scanner.SCAN_DAYS)
+    signals_df, sessions_df = scanner.scan_history(
+        assets, days=scanner.SCAN_DAYS, cfg=scanner.CFG, verbose=False
+    )
+    scanner.export_html(
+        signals_df, sessions_df, DASHBOARD_FILE, scanner.CFG, days=scanner.SCAN_DAYS
+    )
+    print(f"Dashboard generated: {DASHBOARD_FILE}")
 
     if signals_df.empty:
         print("No signals found.")
+        save_state(load_state())
+        return
+
+    # A manual override may be used outside a normal session. In that case the
+    # dashboard is still generated, but there is no current session to alert on.
+    if reference is None:
+        print("Manual scan-window override is active outside a normal session; dashboard generated, no session-specific alert sent.")
         return
 
     state = load_state()
@@ -143,7 +151,6 @@ def main() -> None:
             continue
         message = format_alert(sig)
         print("\n" + message)
-        #discord_send(message)
         telegram_send(message)
         state[key] = now.isoformat()
     save_state(state)
