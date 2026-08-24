@@ -143,7 +143,7 @@ def main() -> None:
             continue
         message = format_alert(sig)
         print("\n" + message)
-        discord_send(message)
+        #discord_send(message)
         telegram_send(message)
         state[key] = now.isoformat()
     save_state(state)
