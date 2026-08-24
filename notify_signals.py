@@ -1,9 +1,4 @@
-"""Run the intraday scanner and send only newly detected SWEEP/REVERSAL signals.
-
-The strategy itself remains in liquidity_sweep_scanner.py. This wrapper adds
-GitHub Actions-friendly dashboard export, duplicate protection, and optional
-Discord/Telegram notifications via environment variables.
-"""
+"""Run the intraday scanner and send newly detected SWEEP/REVERSAL signals."""
 from __future__ import annotations
 
 import json
@@ -16,11 +11,21 @@ import liquidity_sweep_scanner as scanner
 
 STATE_FILE = Path("alert_state.json")
 DASHBOARD_FILE = "index.html"
+USER_AGENT = "Mozilla/5.0 (compatible; LiquiditySweepScanner/1.0)"
 
 
-def post_json(url: str, payload: dict, headers: dict | None = None) -> None:
+def post_json(url: str, payload: dict) -> None:
     data = json.dumps(payload).encode("utf-8")
-    req = request.Request(url, data=data, headers={"Content-Type": "application/json", **(headers or {})}, method="POST")
+    req = request.Request(
+        url,
+        data=data,
+        headers={
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+            "Accept": "application/json",
+        },
+        method="POST",
+    )
     with request.urlopen(req, timeout=15) as response:
         if response.status >= 300:
             raise RuntimeError(f"HTTP {response.status}")
@@ -41,8 +46,10 @@ def telegram_send(message: str) -> None:
     if not token or not chat_id:
         print("Telegram secrets not configured; skipping Telegram notification.")
         return
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    post_json(url, {"chat_id": chat_id, "text": message, "disable_web_page_preview": False})
+    post_json(
+        f"https://api.telegram.org/bot{token}/sendMessage",
+        {"chat_id": chat_id, "text": message, "disable_web_page_preview": False},
+    )
     print("Telegram notification sent.")
 
 
@@ -86,25 +93,16 @@ def format_alert(sig: dict) -> str:
     timestamp = sig["time"].strftime("%Y-%m-%d %H:%M EST")
     reference = sig["session_start"].strftime("%Y-%m-%d %H:%M EST")
     dashboard = "https://compound0x.github.io/liquidity-sweep-reversal/"
-
     lines = [
-        f"{emoji} {title}",
-        "",
-        f"Asset: {sig['asset']}",
-        f"Side: {sig['side']}",
-        f"Reference: {reference}",
-        f"Detected: {timestamp}",
-        f"Price: {fmt_price(sig)}",
+        f"{emoji} {title}", "", f"Asset: {sig['asset']}",
+        f"Side: {sig['side']}", f"Reference: {reference}",
+        f"Detected: {timestamp}", f"Price: {fmt_price(sig)}",
+        f"Detail: {sig['detail']}",
     ]
-
     if kind == "SWEEP":
-        lines.append(f"Detail: {sig['detail']}")
         lines.append("Reversal: Not confirmed yet")
-    else:
-        lines.append(f"Detail: {sig['detail']}")
-        if sig.get("lag_min") is not None:
-            lines.append(f"Minutes after sweep: {int(sig['lag_min'])}")
-
+    elif sig.get("lag_min") is not None:
+        lines.append(f"Minutes after sweep: {int(sig['lag_min'])}")
     lines.extend(["", f"Dashboard: {dashboard}"])
     return "\n".join(lines)
 
@@ -118,8 +116,6 @@ def main() -> None:
 
     assets = scanner._selected_assets()
     signals_df, sessions_df = scanner.scan_history(assets, days=scanner.SCAN_DAYS, cfg=scanner.CFG, verbose=False)
-
-    # Preserve the normal dashboard output, but make the run timestamp/window explicit.
     scanner.export_html(signals_df, sessions_df, DASHBOARD_FILE, scanner.CFG, days=scanner.SCAN_DAYS)
 
     if signals_df.empty:
@@ -127,14 +123,12 @@ def main() -> None:
         return
 
     state = load_state()
-    # Retain recent state only; old keys are no longer useful for duplicate protection.
     cutoff = now - timedelta(days=3)
     state = {k: v for k, v in state.items() if v >= cutoff.isoformat()}
-
     current = signals_df[
-        (signals_df["session_start"] == reference) &
-        (signals_df["time"] <= now) &
-        (signals_df["kind"].isin(["SWEEP", "REVERSAL"]))
+        (signals_df["session_start"] == reference)
+        & (signals_df["time"] <= now)
+        & (signals_df["kind"].isin(["SWEEP", "REVERSAL"]))
     ].copy()
 
     if current.empty:
@@ -147,13 +141,11 @@ def main() -> None:
         key = signal_key(sig)
         if key in state:
             continue
-
         message = format_alert(sig)
         print("\n" + message)
         discord_send(message)
         telegram_send(message)
         state[key] = now.isoformat()
-
     save_state(state)
 
 
