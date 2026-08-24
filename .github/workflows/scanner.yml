@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
   schedule:
     # Every 5 minutes, Monday through Sunday. The Python gate below uses
-    # America/New_York so EST/EDT is handled automatically.
+    # America/New_York so the clock remains correct through DST changes.
     - cron: "*/5 7-21 * * *"
 
 permissions:
@@ -62,8 +62,8 @@ jobs:
           reference_hours = (3, 10, 14)
           active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in reference_hours)
 
-          print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
-          print("Reference candles: 03:00, 10:00, 14:00 EST/EDT")
+          print(f"Timestamp (EST): {now:%Y-%m-%d %H:%M:%S} EST")
+          print("Reference candles: 03:00, 10:00, 14:00 EST")
           print(f"Scan window active: {active}")
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
@@ -73,7 +73,22 @@ jobs:
         if: steps.window.outputs.active != 'true'
         run: echo "Outside the 1-hour post-reference scan windows; no scanner run needed."
 
-      - name: Run scanner and notify Discord + Telegram
+      - name: Run scanner
+        if: steps.window.outputs.active == 'true'
+        run: python liquidity_sweep_scanner.py
+
+      - name: Label dashboard timestamps as EST
+        if: steps.window.outputs.active == 'true'
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          p = Path("index.html")
+          s = p.read_text(encoding="utf-8")
+          s = s.replace(" NY", " EST")
+          p.write_text(s, encoding="utf-8")
+          PY
+
+      - name: Notify Discord + Telegram for new SWEEP/REVERSAL signals
         if: steps.window.outputs.active == 'true'
         env:
           DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
@@ -81,107 +96,121 @@ jobs:
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: |
           python - <<'PY'
-          import hashlib, json, os
+          import json, os
           from datetime import datetime, timedelta
           from urllib.request import Request, urlopen
           from zoneinfo import ZoneInfo
-
           import liquidity_sweep_scanner as scanner
 
-          NY = ZoneInfo("America/New_York")
-          now = datetime.now(NY)
-          sig_df, _ = scanner.main()
-          current = []
+          TZ = ZoneInfo("America/New_York")
+          now = datetime.now(TZ)
+          reference = None
+          for h in scanner.CFG.session_hours:
+              ss = now.replace(hour=h, minute=0, second=0, microsecond=0)
+              if ss + timedelta(minutes=5) <= now <= ss + timedelta(minutes=scanner.CFG.window_minutes):
+                  reference = ss
+                  break
+          if reference is None:
+              raise SystemExit("No active reference window.")
 
+          # The scanner has already run above; replay its recent scan in memory
+          # to obtain structured signals for the current 1H reference window.
+          sig_df, _ = scanner.scan_history(scanner._selected_assets(), days=scanner.SCAN_DAYS, cfg=scanner.CFG, verbose=False)
+
+          current = []
           if sig_df is not None and not sig_df.empty:
               for row in sig_df.to_dict("records"):
                   ss = row.get("session_start")
-                  if ss is None:
-                      continue
                   if hasattr(ss, "to_pydatetime"):
                       ss = ss.to_pydatetime()
-                  if ss.tzinfo is None:
-                      ss = ss.replace(tzinfo=NY)
-                  ss = ss.astimezone(NY)
-                  if ss.date() != now.date() or not (ss + timedelta(minutes=5) <= now <= ss + timedelta(minutes=60)):
+                  if ss is None:
                       continue
-                  clean = {}
-                  for k, v in row.items():
-                      if hasattr(v, "isoformat"):
-                          clean[k] = v.isoformat()
-                      else:
-                          try:
-                              clean[k] = v.item()
-                          except AttributeError:
-                              clean[k] = v
-                  clean["timestamp_est"] = now.strftime("%Y-%m-%d %H:%M:%S EST/EDT")
-                  clean["reference_est"] = ss.strftime("%Y-%m-%d %H:%M EST/EDT")
-                  current.append(clean)
-
-          def key(s):
-              return "|".join(str(s.get(k, "")) for k in ("asset", "session", "kind", "side", "time"))
+                  if ss.tzinfo is None:
+                      ss = ss.replace(tzinfo=TZ)
+                  ss = ss.astimezone(TZ)
+                  if ss != reference:
+                      continue
+                  ts = row.get("time")
+                  if hasattr(ts, "to_pydatetime"):
+                      ts = ts.to_pydatetime()
+                  if ts is None or ts.astimezone(TZ) > now:
+                      continue
+                  if row.get("kind") not in ("SWEEP", "REVERSAL"):
+                      continue
+                  current.append(row)
 
           state_path = ".signal_state.json"
           try:
-              with open(state_path, encoding="utf-8") as f:
-                  sent = set(json.load(f))
+              sent = set(json.loads(open(state_path, encoding="utf-8").read()))
           except (FileNotFoundError, json.JSONDecodeError):
               sent = set()
 
-          fresh = [s for s in current if key(s) not in sent]
-          print(f"Current-window signals: {len(current)}; new signals: {len(fresh)}")
+          def key(s):
+              ts = s.get("time")
+              if hasattr(ts, "isoformat"):
+                  ts = ts.isoformat()
+              return "|".join(str(s.get(k, "")) for k in ("asset", "session", "kind", "side")) + "|" + str(ts)
 
-          def text(s):
-              kind = s.get("kind", "SIGNAL")
-              side = s.get("side", "")
-              asset = s.get("asset", "")
-              price = s.get("price", "")
-              detail = s.get("detail", "")
-              return (
-                  f"{'🚨' if kind == 'REVERSAL' else '⚠️'} {kind} {side}\n"
-                  f"Asset: {asset}\n"
-                  f"Reference: {s.get('reference_est', '')}\n"
-                  f"Time: {s.get('timestamp_est', '')}\n"
-                  f"Price: {price}\n"
-                  f"{detail}\n\n"
-                  f"Dashboard: https://compound0x.github.io/liquidity-sweep-reversal/"
-              )
+          def scalar(v):
+              try:
+                  return v.item()
+              except AttributeError:
+                  return v
+
+          def message(s):
+              kind = s["kind"]
+              emoji = "🟢" if kind == "REVERSAL" else "🟡"
+              title = "REVERSAL CONFIRMED" if kind == "REVERSAL" else "LIQUIDITY SWEEP"
+              ts = s["time"]
+              if hasattr(ts, "to_pydatetime"):
+                  ts = ts.to_pydatetime()
+              return (f"{emoji} {title}\n\n"
+                      f"Asset: {s['asset']}\n"
+                      f"Side: {s['side']}\n"
+                      f"Reference: {reference:%Y-%m-%d %H:%M} EST\n"
+                      f"Detected: {ts:%Y-%m-%d %H:%M} EST\n"
+                      f"Price: {s['price']}\n"
+                      f"{s['detail']}\n\n"
+                      "Dashboard: https://compound0x.github.io/liquidity-sweep-reversal/")
 
           def post(url, payload):
-              if not url:
-                  return
               req = Request(url, data=json.dumps(payload).encode(), headers={"Content-Type": "application/json"}, method="POST")
               with urlopen(req, timeout=15) as r:
                   print(f"Notification sent: HTTP {r.status}")
 
+          fresh = [s for s in current if key(s) not in sent]
+          print(f"Current-window signals: {len(current)}; new signals: {len(fresh)}")
+
           for s in fresh:
-              msg = text(s)
+              msg = message(s)
               if os.environ.get("DISCORD_WEBHOOK_URL"):
                   post(os.environ["DISCORD_WEBHOOK_URL"], {"content": msg})
+              else:
+                  print("DISCORD_WEBHOOK_URL not configured; Discord skipped.")
               if os.environ.get("TELEGRAM_BOT_TOKEN") and os.environ.get("TELEGRAM_CHAT_ID"):
-                  post(
-                      f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
-                      {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg},
-                  )
+                  post(f"https://api.telegram.org/bot{os.environ['TELEGRAM_BOT_TOKEN']}/sendMessage",
+                       {"chat_id": os.environ["TELEGRAM_CHAT_ID"], "text": msg})
+              else:
+                  print("Telegram secrets not configured; Telegram skipped.")
               sent.add(key(s))
 
-          # Keep state small: retain the most recent 500 signal keys.
-          sent_list = list(sent)[-500:]
+          # Keep only the newest 500 keys. This file is committed so duplicate
+          # alerts are suppressed across separate 5-minute workflow runs.
           with open(state_path, "w", encoding="utf-8") as f:
-              json.dump(sent_list, f, indent=2)
-          with open("current_signals.json", "w", encoding="utf-8") as f:
-              json.dump(current, f, indent=2, default=str)
+              json.dump(list(sent)[-500:], f, indent=2)
           PY
 
       - name: Persist notification state
         if: steps.window.outputs.active == 'true'
         run: |
-          if ! git diff --quiet -- .signal_state.json; then
+          if [ -f .signal_state.json ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
             git add .signal_state.json
-            git commit -m "Update signal notification state"
-            git push
+            if ! git diff --cached --quiet; then
+              git commit -m "Update signal notification state"
+              git push
+            fi
           fi
 
       - name: Verify dashboard
