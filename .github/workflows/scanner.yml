@@ -9,14 +9,19 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "*/5 7-21 * * *"
+    # Exact 5-minute polling windows in New York local time.
+    # GitHub supports IANA timezones, so DST is handled automatically.
+    - cron: "5-55/5 3,10,14 * * *"
+      timezone: "America/New_York"
+    - cron: "0 4 * * *"
+      timezone: "America/New_York"
 
 permissions:
   contents: write
 
 concurrency:
   group: liquidity-sweep-scanner
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 env:
   TEST_NOTIFICATION: ${{ inputs.test_notification || 'false' }}
@@ -91,7 +96,7 @@ jobs:
           print("Scanner syntax check passed and production settings applied.")
           PY
 
-      - name: Check EST scan window
+      - name: Verify active EST scan window
         id: window
         if: env.TEST_NOTIFICATION != 'true'
         run: |
@@ -102,6 +107,7 @@ jobs:
           minute = now.hour * 60 + now.minute
           active = any(h * 60 + 5 <= minute <= h * 60 + 60 for h in (3, 10, 14))
           print(f"Timestamp (EST/EDT): {now:%Y-%m-%d %H:%M:%S %Z}")
+          print("Expected runs: 03:05-04:00, 10:05-11:00, 14:05-15:00")
           print(f"Scan window active: {active}")
           with open("$GITHUB_OUTPUT", "a", encoding="utf-8") as f:
               f.write(f"active={'true' if active else 'false'}\n")
