@@ -14,7 +14,7 @@ on:
         type: boolean
         default: false
   schedule:
-    - cron: "*/5 * * * *"
+    - cron: "*/15 * * * *"
 
 permissions:
   contents: write
@@ -99,6 +99,7 @@ jobs:
 
           print(f"Timestamp (New York): {now:%Y-%m-%d %H:%M:%S %Z}")
           print("Normal windows: 03:05-04:00, 10:05-11:00, 14:05-15:00")
+          print("Scheduled scan cadence: every 15 minutes")
           print(f"Normal window active: {normal}")
           print(f"Workflow event: {os.getenv('GITHUB_EVENT_NAME')}")
           print(f"Manual override input: {os.getenv('OVERRIDE_INPUT')}")
